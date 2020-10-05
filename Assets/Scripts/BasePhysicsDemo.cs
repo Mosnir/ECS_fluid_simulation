@@ -1,0 +1,160 @@
+﻿using System;
+using System.Collections.Generic;
+using Unity.Physics;
+using Unity.Physics.Extensions;
+using Unity.Entities;
+using Unity.Mathematics;
+using Unity.Rendering;
+using Unity.Transforms;
+using UnityEngine;
+using Collider = Unity.Physics.Collider;
+using Material = UnityEngine.Material;
+using Mesh = UnityEngine.Mesh;
+
+/// <summary>
+/// Helper for demos set up in C# rather than in the editor
+/// </summary>
+public class BasePhysicsDemo : MonoBehaviour
+{
+    public static World DefaultWorld
+    {
+        get
+        {
+#if UNITY_ENTITIES_0_2_0_OR_NEWER
+            return World.DefaultGameObjectInjectionWorld;
+#else
+            return World.Active;
+#endif
+        }
+    }
+
+    protected Entity stepper;
+
+    public Material dynamicMaterial;
+    public Material staticMaterial;
+
+    public SimulationType StepType = SimulationType.UnityPhysics;
+
+    protected void init(float3 gravity)
+    {
+
+        // Create the stepper
+        var entityManager = DefaultWorld.EntityManager;
+        ComponentType[] componentTypes = {
+            typeof(PhysicsStep),
+            typeof(Unity.Physics.Authoring.PhysicsDebugDisplayData)
+        };
+        stepper = entityManager.CreateEntity(componentTypes);
+        entityManager.SetComponentData(stepper, new PhysicsStep
+        {
+            SimulationType = StepType,
+            Gravity = gravity,
+            SolverIterationCount = PhysicsStep.Default.SolverIterationCount,
+            ThreadCountHint = PhysicsStep.Default.ThreadCountHint
+        });
+        // Add options for visually debugging physics information
+        entityManager.SetComponentData(stepper, new Unity.Physics.Authoring.PhysicsDebugDisplayData { });
+
+
+        // Load assets
+        //dynamicMaterial = (Material)Resources.Load("Materials/PhysicsDynamicMaterial");
+        //staticMaterial = (Material)Resources.Load("Materials/PhysicsStaticMaterial");
+    }
+
+    protected virtual void Start()
+    {
+        init(new float3(0, -9.81f, 0));
+    }
+
+    //
+    // Object creation
+    //
+
+    private Entity CreateBody(float3 position, quaternion orientation, BlobAssetReference<Collider> collider,
+        float3 linearVelocity, float3 angularVelocity, float mass, bool isDynamic)
+    {
+        var entityManager = DefaultWorld.EntityManager;
+
+        Entity entity = entityManager.CreateEntity(new ComponentType[] { });
+
+        entityManager.AddComponentData(entity, new LocalToWorld { });
+        entityManager.AddComponentData(entity, new Translation { Value = position });
+        entityManager.AddComponentData(entity, new Rotation { Value = orientation });
+
+        var colliderComponent = new PhysicsCollider { Value = collider };
+        entityManager.AddComponentData(entity, colliderComponent);
+
+        Mesh mesh = new Mesh();
+#pragma warning disable 618
+        List<Unity.Physics.Authoring.DisplayBodyColliders.DrawComponent.DisplayResult> meshes;
+        unsafe { meshes = Unity.Physics.Authoring.DisplayBodyColliders.DrawComponent.BuildDebugDisplayMesh(colliderComponent.ColliderPtr); }
+#pragma warning restore 618
+        CombineInstance[] instances = new CombineInstance[meshes.Count];
+        int numVertices = 0;
+        for (int i = 0; i < meshes.Count; i++)
+        {
+            instances[i] = new CombineInstance
+            {
+                mesh = meshes[i].Mesh,
+                transform = Matrix4x4.TRS(meshes[i].Position, meshes[i].Orientation, meshes[i].Scale)
+            };
+            numVertices += meshes[i].Mesh.vertexCount;
+        }
+        mesh.indexFormat = numVertices > UInt16.MaxValue ? UnityEngine.Rendering.IndexFormat.UInt32 : UnityEngine.Rendering.IndexFormat.UInt16;
+        mesh.CombineMeshes(instances);
+
+        entityManager.AddSharedComponentData(entity, new RenderMesh
+        {
+            mesh = mesh,
+            material = isDynamic ? dynamicMaterial : staticMaterial
+        });
+
+        if (isDynamic)
+        {
+            entityManager.AddComponentData(entity, PhysicsMass.CreateDynamic(colliderComponent.MassProperties, mass));
+
+            float3 angularVelocityLocal = math.mul(math.inverse(colliderComponent.MassProperties.MassDistribution.Transform.rot), angularVelocity);
+            entityManager.AddComponentData(entity, new PhysicsVelocity()
+            {
+                Linear = linearVelocity,
+                Angular = angularVelocityLocal
+            });
+            entityManager.AddComponentData(entity, new PhysicsDamping()
+            {
+                Linear = 0.01f,
+                Angular = 0.05f
+            });
+        }
+
+        return entity;
+    }
+
+    protected Entity CreateStaticBody(float3 position, quaternion orientation, BlobAssetReference<Collider> collider)
+    {
+        return CreateBody(position, orientation, collider, float3.zero, float3.zero, 0.0f, false);
+    }
+
+    protected Entity CreateDynamicBody(float3 position, quaternion orientation, BlobAssetReference<Collider> collider,
+        float3 linearVelocity, float3 angularVelocity, float mass)
+    {
+        return CreateBody(position, orientation, collider, linearVelocity, angularVelocity, mass, true);
+    }
+
+    //
+    // Helper methods
+    //
+
+    protected void SetDebugDisplay(Unity.Physics.Authoring.PhysicsDebugDisplayData debugDisplay)
+    {
+        var entityManager = DefaultWorld.EntityManager;
+        entityManager.SetComponentData<Unity.Physics.Authoring.PhysicsDebugDisplayData>(stepper, debugDisplay);
+    }
+
+    protected RigidTransform GetBodyTransform(Entity entity)
+    {
+        var entityManager = DefaultWorld.EntityManager;
+        return new RigidTransform(
+            entityManager.GetComponentData<Rotation>(entity).Value,
+            entityManager.GetComponentData<Translation>(entity).Value);
+    }
+}
